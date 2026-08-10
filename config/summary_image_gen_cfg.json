@@ -1,0 +1,13 @@
+{
+    "config": {
+        "model": "doubao-seedream-5-0-260128",
+        "size": "2K",
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "max_completion_tokens": 1000,
+        "thinking": "disabled"
+    },
+    "tools": [],
+    "sp": "Create a professional and visually appealing video summary infographic poster. The design should be modern, clean, and information-rich. Design Requirements: Style - Modern infographic poster with a professional look; Layout - Clear visual hierarchy with a prominent title area at the top, key points displayed in organized sections with icons or visual markers, and a summary section at the bottom; Color Scheme - Use a harmonious and professional color palette; Typography - Bold, readable titles with clear section headers; Visual Elements - Include relevant icons, dividers, and decorative elements to enhance readability; Text should be in Chinese (Simplified); High contrast for readability; Include visual indicators like numbered points, bullet icons, or section dividers. The final image should look like a professionally designed video summary card that can be shared on social media or used as a quick reference.",
+    "up": "Based on the following video analysis content, generate a visually stunning summary infographic poster:\n\nVideo Analysis:\n{{ analysis_result }}\n\nPlease create a poster that effectively communicates the video's core message at a glance, with clear sections for the main theme, key points, and summary."
+}
