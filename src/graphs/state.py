@@ -6,19 +6,21 @@ from utils.file.file import File
 class GlobalState(BaseModel):
     """全局状态定义"""
     video_url: File = Field(..., description="输入的视频文件/链接")
-    analysis_result: str = Field(default="", description="视频内容分析结果")
-    summary_image_url: str = Field(default="", description="生成的总结图片URL")
+    style: str = Field(default="dark-tech", description="知识卡片艺术风格：dark-tech(深色科技)/pop(波普)/cyber(赛博)/vaporwave(蒸汽波)/glassmorphism(玻璃拟态)/bauhaus(包豪斯)")
+    card_content: dict = Field(default={}, description="从视频中提炼的知识卡片结构化内容")
+    card_image_url: str = Field(default="", description="生成的知识卡片图片URL")
 
 
 class GraphInput(BaseModel):
     """工作流的输入"""
     video_url: File = Field(..., description="输入的视频文件/链接")
+    style: str = Field(default="dark-tech", description="知识卡片艺术风格：dark-tech(深色科技)/pop(波普)/cyber(赛博)/vaporwave(蒸汽波)/glassmorphism(玻璃拟态)/bauhaus(包豪斯)")
 
 
 class GraphOutput(BaseModel):
     """工作流的输出"""
-    summary_image_url: str = Field(..., description="生成的总结图片URL")
-    analysis_result: str = Field(default="", description="视频内容分析结果")
+    card_image_url: str = Field(..., description="生成的知识卡片图片URL")
+    card_content: dict = Field(default={}, description="知识卡片结构化内容")
 
 
 class VideoAnalysisInput(BaseModel):
@@ -28,14 +30,15 @@ class VideoAnalysisInput(BaseModel):
 
 class VideoAnalysisOutput(BaseModel):
     """视频内容分析节点的输出"""
-    analysis_result: str = Field(..., description="视频内容分析结果，包含主要观点、关键画面、重要标题等核心信息")
+    card_content: dict = Field(..., description="从视频中提炼的知识卡片结构化内容，包含title/key_points/summary等字段")
 
 
-class SummaryImageGenInput(BaseModel):
-    """总结图片生成节点的输入"""
-    analysis_result: str = Field(..., description="视频内容分析结果，包含核心信息摘要")
+class KnowledgeCardGenInput(BaseModel):
+    """知识卡片生成节点的输入"""
+    card_content: dict = Field(..., description="知识卡片结构化内容")
+    style: str = Field(default="dark-tech", description="知识卡片艺术风格")
 
 
-class SummaryImageGenOutput(BaseModel):
-    """总结图片生成节点的输出"""
-    summary_image_url: str = Field(..., description="生成的视频总结图片URL")
+class KnowledgeCardGenOutput(BaseModel):
+    """知识卡片生成节点的输出"""
+    card_image_url: str = Field(..., description="生成的知识卡片图片URL")

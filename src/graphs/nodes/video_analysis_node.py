@@ -9,10 +9,27 @@ from coze_coding_dev_sdk import LLMClient
 from graphs.state import VideoAnalysisInput, VideoAnalysisOutput
 
 
+def _extract_text(content) -> str:
+    """安全提取LLM响应文本"""
+    if isinstance(content, str):
+        return content
+    elif isinstance(content, list):
+        if content and isinstance(content[0], str):
+            return " ".join(content)
+        else:
+            text_parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            return " ".join(text_parts)
+    return str(content)
+
+
 def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runtime: Runtime[Context]) -> VideoAnalysisOutput:
     """
-    title: 视频内容分析
-    desc: 使用多模态大模型分析视频内容，提取核心信息（主要观点、关键画面、重要标题等）
+    title: 视频内容分析与知识提炼
+    desc: 使用多模态大模型分析视频内容，提炼出适合知识卡片展示的结构化文案（标题、要点、总结等）
     integrations: 大语言模型
     """
     ctx = runtime.context
@@ -29,10 +46,6 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
     # 获取视频URL
     video_url = state.video_url.url
 
-    # 使用jinja2模板渲染用户提示词
-    up_tpl = Template(up)
-    user_prompt_content = up_tpl.render(video_url=video_url)
-
     # 初始化LLM客户端
     client = LLMClient(ctx=ctx)
 
@@ -40,7 +53,7 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
     messages = [
         SystemMessage(content=sp),
         HumanMessage(content=[
-            {"type": "text", "text": user_prompt_content},
+            {"type": "text", "text": up},
             {"type": "video_url", "video_url": {"url": video_url}}
         ])
     ]
@@ -58,23 +71,35 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
     )
 
     # 安全提取响应内容
-    analysis_text = ""
-    if isinstance(response.content, str):
-        analysis_text = response.content
-    elif isinstance(response.content, list):
-        if response.content and isinstance(response.content[0], str):
-            analysis_text = " ".join(response.content)
-        else:
-            text_parts = [
-                item.get("text", "")
-                for item in response.content
-                if isinstance(item, dict) and item.get("type") == "text"
-            ]
-            analysis_text = " ".join(text_parts)
-    else:
-        analysis_text = str(response.content)
+    analysis_text = _extract_text(response.content)
 
     if not analysis_text.strip():
         raise ValueError("视频内容分析结果为空，请检查视频链接是否有效")
 
-    return VideoAnalysisOutput(analysis_result=analysis_text)
+    # 尝试解析JSON格式的输出
+    card_content = {}
+    try:
+        # 尝试从文本中提取JSON
+        json_start = analysis_text.find("{")
+        json_end = analysis_text.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = analysis_text[json_start:json_end]
+            card_content = json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        # 如果不是JSON，构造默认结构
+        card_content = {
+            "title": "视频内容总结",
+            "key_points": [analysis_text[:200]],
+            "summary": analysis_text[:100],
+            "raw_analysis": analysis_text
+        }
+
+    # 确保必要字段存在
+    if "title" not in card_content:
+        card_content["title"] = "视频内容总结"
+    if "key_points" not in card_content:
+        card_content["key_points"] = [card_content.get("summary", analysis_text[:100])]
+    if "summary" not in card_content:
+        card_content["summary"] = analysis_text[:100]
+
+    return VideoAnalysisOutput(card_content=card_content)
