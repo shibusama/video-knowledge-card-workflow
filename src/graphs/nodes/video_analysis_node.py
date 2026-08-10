@@ -123,6 +123,11 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
     sp = llm_cfg.get("sp", "")
     up = llm_cfg.get("up", "")
 
+    # 如果用户手动提供了card_content，直接使用（跳过视频分析）
+    if state.manual_content and isinstance(state.manual_content, dict) and state.manual_content.get("title"):
+        logger.info("使用手动输入的内容，跳过视频分析")
+        return VideoAnalysisOutput(card_content=state.manual_content)
+
     # 获取视频URL
     video_url = state.video_url.url
 

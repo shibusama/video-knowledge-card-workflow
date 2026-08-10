@@ -3,6 +3,13 @@
 通过 Playwright 无头浏览器抓取抖音视频的真实播放地址
 """
 import sys, json, time, re
+import requests
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/121.0.2277.107 Version/17.0 Mobile/15E148 Safari/604.1",
+    "Referer": "https://www.douyin.com/",
+    "Accept": "application/json, text/plain, */*"
+}
 
 def fetch_douyin_video(video_url: str) -> dict:
     """抓取抖音视频信息，返回 {video_url, title, desc}"""
