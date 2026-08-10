@@ -2,10 +2,11 @@ from langgraph.graph import StateGraph, END
 from graphs.state import (
     GlobalState,
     GraphInput,
-    GraphOutput
+    GraphOutput,
 )
 from graphs.nodes.video_analysis_node import video_analysis_node
 from graphs.nodes.knowledge_card_gen_node import knowledge_card_gen_node
+
 
 # 创建状态图，指定全局状态、输入和输出结构
 builder = StateGraph(GlobalState, input_schema=GraphInput, output_schema=GraphOutput)
@@ -19,13 +20,13 @@ builder.add_node(
 builder.add_node(
     "knowledge_card_gen",
     knowledge_card_gen_node,
-    metadata={"llm_cfg": "config/video_analysis_llm_cfg.json"}
+    metadata={"llm_cfg": "config/summary_image_gen_cfg.json"}
 )
 
 # 设置入口点
 builder.set_entry_point("video_analysis")
 
-# 添加边：视频分析 -> 知识卡片生成 -> 结束
+# 边
 builder.add_edge("video_analysis", "knowledge_card_gen")
 builder.add_edge("knowledge_card_gen", END)
 
