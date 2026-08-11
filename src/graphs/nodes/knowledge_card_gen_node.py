@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import random
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -77,18 +78,56 @@ def _build_card_prompt(
 
     style_desc = style_descriptions.get(style, style_descriptions["dark-tech"])
 
+    # 随机选择一种布局，每次不一样
+    layouts = [
+        # 布局1: 经典列表
+        """CARD LAYOUT (top to bottom):
+1. Top section: A thin decorative line/accent across the top
+2. Title area: The main title in large, bold font, centered
+3. Content area: Key points listed vertically in individual bordered rounded boxes, each with a number prefix
+4. Tags area: Small tag badges with hashtags, arranged horizontally
+5. Bottom section: A highlighted summary panel with the brief statement""",
+
+        # 布局2: 两列并排
+        """CARD LAYOUT (top to bottom):
+1. Title area: Large bold title at the top, centered with a decorative underline
+2. Content area: Key points arranged in TWO COLUMNS side by side, each point in a small card/box, numbered
+3. Tags area: Tags displayed as small pills/badges in a row
+4. Bottom section: Full-width summary bar at the bottom with accent background""",
+
+        # 布局3: 杂志风格
+        """CARD LAYOUT (top to bottom):
+1. Top section: Title in large serif-style font, with a decorative line below
+2. Content area: Each key point styled as a "quote card" with a large number in the background, text overlaid
+3. Tags area: Tags shown as small text links with dots between them
+4. Bottom section: Summary in a pull-quote style box with a different background color""",
+
+        # 布局4: 极简留白
+        """CARD LAYOUT (top to bottom):
+1. Title area: Clean minimal title at top-left, small and elegant
+2. Divider: A thin horizontal line separating title from content
+3. Content area: Key points listed with minimal styling - just a small dot and text, no boxes, lots of whitespace
+4. Tags area: Minimal tags in small gray text
+5. Bottom section: Summary in a simple thin-bordered box at the bottom, clean and understated""",
+
+        # 布局5: 仪表盘网格
+        """CARD LAYOUT (top to bottom):
+1. Top section: A status-bar style decorative element at the very top
+2. Title area: Bold title with a colored background strip/ribbon behind it
+3. Content area: Key points in a "dashboard" style - each point in a square tile, arranged in a grid (2 columns), with a number in the corner
+4. Tags area: Tags displayed as small colored badges at the bottom of the tile area
+5. Bottom section: Summary in a horizontal gradient bar spanning the full width""",
+    ]
+
+    layout_desc = random.choice(layouts)
+
     prompt = f"""Create a vertical knowledge card (9:16 ratio, portrait orientation) as a high-quality PNG image.
 
 STYLE: {style_desc}
 
 The card MUST contain the following EXACT text content, rendered as CLEAR, READABLE Chinese text. Every character must be accurate - no typos, no substitutions, no missing strokes.
 
-CARD LAYOUT (top to bottom):
-1. Top section: A decorative line/accent
-2. Title area: The main title text in large, bold font
-3. Content area: Key points listed in individual bordered boxes, each with a number
-4. Tags area: Small tag badges with hashtags
-5. Bottom section: A summary panel with a brief statement
+{layout_desc}
 
 TEXT CONTENT (CRITICAL - render these EXACTLY):
 Title: {title}
@@ -108,8 +147,7 @@ IMPORTANT REQUIREMENTS:
 - 1080x1920 pixel resolution equivalent (9:16 portrait)
 - High contrast between text and background for readability
 - DO NOT use placeholder text - render the exact content provided above
-- Each key point should be in its own distinct box/panel
-- The summary should be visually separated at the bottom"""
+- Each key point should be in its own distinct box/panel as described in the layout"""
 
     return prompt
 
