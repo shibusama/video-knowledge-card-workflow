@@ -158,6 +158,12 @@ def knowledge_card_gen_node(state: KnowledgeCardGenInput, config: RunnableConfig
     card_content = state.card_content
     style = state.style
 
+    # ========== 如果上游有错误，直接跳过卡片生成 ==========
+    if state.error:
+        logger.warning(f"上游检测到错误，跳过卡片生成: {state.error}")
+        return KnowledgeCardGenOutput(error=state.error)
+    # ====================================================
+
     # 获取风格配置
     style_cfg = STYLE_CONFIGS.get(style, STYLE_CONFIGS["dark-tech"])
 

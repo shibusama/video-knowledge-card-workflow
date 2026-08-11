@@ -107,6 +107,33 @@ def _parse_card_content_from_text(analysis_text: str) -> dict:
     return card_content
 
 
+def _check_url_available(url: str) -> tuple[bool, str]:
+    """快速检测URL是否可解析，返回 (是否可用, 错误信息)"""
+    # 抖音链接：尝试获取页面内容
+    if _is_douyin_url(url):
+        page_content = _fetch_douyin_page_content(url)
+        # 如果页面内容只是URL本身或为空，说明没拿到内容
+        if not page_content.strip() or page_content.strip() == f"视频页面: {url}":
+            return False, "该抖音链接无法解析，可能是链接已失效、需要登录或抖音限制了访问"
+        return True, ""
+
+    # 视频号链接：检查HY_TOKEN
+    if is_sph_url(url):
+        hy_token = os.getenv("HY_TOKEN", "")
+        if not hy_token:
+            return False, "视频号链接需要配置 HY_TOKEN 环境变量才能解析（腾讯元宝cookie）"
+        return True, ""
+
+    # 普通视频URL：检查是否可达
+    try:
+        resp = requests.head(url, timeout=10, allow_redirects=True)
+        if resp.status_code >= 400:
+            return False, f"视频链接不可访问（HTTP {resp.status_code}），请检查链接是否正确"
+        return True, ""
+    except requests.RequestException as e:
+        return False, f"视频链接无法连接: {str(e)[:60]}"
+
+
 def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runtime: Runtime[Context]) -> VideoAnalysisOutput:
     """
     title: 视频内容分析与知识提炼
@@ -131,6 +158,21 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
 
     # 获取视频URL
     video_url = state.video_url.url
+
+    # ========== URL可解析性检测 ==========
+    available, err_msg = _check_url_available(video_url)
+    if not available:
+        logger.warning(f"URL不可解析: {video_url} - {err_msg}")
+        return VideoAnalysisOutput(
+            card_content={
+                "title": "⚠️ 无法解析该链接",
+                "key_points": [err_msg],
+                "summary": "请检查链接是否有效，或尝试更换其他链接",
+                "tags": ["解析失败"]
+            },
+            error=err_msg
+        )
+    # =====================================
 
     # 初始化LLM客户端
     client = LLMClient(ctx=ctx)
