@@ -11,6 +11,7 @@ from langgraph.runtime import Runtime
 from coze_coding_utils.runtime_ctx.context import Context
 from coze_coding_dev_sdk import LLMClient
 from graphs.state import VideoAnalysisInput, VideoAnalysisOutput
+from utils.wechat_sph import is_sph_url, parse_sph_url
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +205,63 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
         card_content = _parse_card_content_from_text(analysis_text)
 
     else:
-        # === 普通视频URL处理流程：多模态分析视频内容 ===
+        # === 视频号链接处理流程：元宝解析拿直链 → 多模态分析；失败则回退到文本分析 ===
+        video_stream_url = ""
+        if is_sph_url(video_url):
+            try:
+                video_stream_url = parse_sph_url(video_url).get("video_url", "")
+                if not video_stream_url:
+                    raise ValueError("元宝解析未返回 video_url")
+            except Exception as exc:
+                logger.warning(f"视频号元宝解析失败，回退文本分析: {exc}")
+                video_stream_url = ""
+
+        if video_stream_url:
+            messages = [
+                SystemMessage(content=sp),
+                HumanMessage(content=[
+                    {"type": "text", "text": up},
+                    {"type": "video_url", "video_url": {"url": video_stream_url}}
+                ])
+            ]
+
+            response = client.invoke(
+                messages=messages,
+                model=model_id,
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens
+            )
+
+            analysis_text = _extract_text(response.content)
+            if analysis_text.strip():
+                card_content = _parse_card_content_from_text(analysis_text)
+                return VideoAnalysisOutput(card_content=card_content)
+
+        # 回退方案：web_fetch获取页面文本 → LLM提取内容
+        page_content = _fetch_douyin_page_content(video_url)
+
+        if not page_content.strip():
+            page_content = f"视频链接: {video_url}"
+
+        if len(page_content) > 8000:
+            page_content = page_content[:8000]
+
+        text_analysis_prompt = f"""请根据以下视频页面内容，提取视频的核心信息，返回JSON格式：
+
+{{
+  "title": "视频标题/核心主题",
+  "key_points": ["要点1", "要点2", "要点3", ...],
+  "summary": "一句话总结（不超过30字）",
+  "tags": ["标签1", "标签2", ...]
+}}
+
+页面内容：
+{page_content}
+"""
+
         messages = [
-            SystemMessage(content=sp),
-            HumanMessage(content=[
-                {"type": "text", "text": up},
-                {"type": "video_url", "video_url": {"url": video_url}}
-            ])
+            SystemMessage(content="你是一个专业的内容分析助手，擅长从视频页面信息中提取核心内容，整理成知识卡片文案。"),
+            HumanMessage(content=[{"type": "text", "text": text_analysis_prompt}])
         ]
 
         response = client.invoke(
@@ -221,10 +272,6 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
         )
 
         analysis_text = _extract_text(response.content)
-
-        if not analysis_text.strip():
-            raise ValueError("视频内容分析结果为空，请检查视频链接是否有效")
-
         card_content = _parse_card_content_from_text(analysis_text)
 
     return VideoAnalysisOutput(card_content=card_content)
