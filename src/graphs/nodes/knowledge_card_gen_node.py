@@ -1,301 +1,574 @@
-import os
+"""知识卡片生成节点 - 使用Pillow渲染文字（无需浏览器）"""
+
+import io
 import json
-import uuid
-import shutil
 import logging
+import math
+import os
+import re
+import tempfile
+import time
+from typing import Any, Dict, List, Optional
+
 import requests
-from io import BytesIO
-from typing import List, Dict, Any, Optional
-from PIL import Image
-from playwright.sync_api import sync_playwright
+from jinja2 import Template
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 from coze_coding_utils.runtime_ctx.context import Context
-from coze_coding_dev_sdk import ImageGenerationClient
-from storage.s3.s3_storage import S3SyncStorage
+from pydantic import BaseModel, Field
+
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
 from graphs.state import KnowledgeCardGenInput, KnowledgeCardGenOutput
+from utils.file.file import File, FileOps
 
 logger = logging.getLogger(__name__)
 
+# ── 字体配置 ──
+FONT_DIR = "/usr/share/fonts/truetype/wqy"
+FONT_REGULAR = os.path.join(FONT_DIR, "wqy-microhei.ttc")
+FONT_BOLD = os.path.join(FONT_DIR, "wqy-zenhei.ttc")
 
-def _ensure_chromium_installed() -> None:
-    """自动检查并安装 Playwright Chromium 浏览器（部署环境没有时自动下载）"""
-    import subprocess
-    import sys
-    from pathlib import Path
+# ── 卡片尺寸 ──
+CARD_WIDTH = 1080
+CARD_HEIGHT = 1920
 
-    # 检查浏览器是否已安装
-    chromium_path = Path.home() / ".cache" / "ms-playwright"
-    if not any(chromium_path.glob("chromium*")):
-        logger.info("Playwright Chromium 未安装，正在自动下载...")
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
-                check=True, capture_output=True, text=True, timeout=120
-            )
-            logger.info("Playwright Chromium 安装成功")
-        except Exception as e:
-            logger.error(f"Playwright 安装失败: {e}")
-            raise RuntimeError("自动安装 Playwright Chromium 失败，请检查网络或手动安装")
-
-
-# ============================================================
-# 风格配置 - 基于 video-knowledge-card 技能
-# ============================================================
-STYLE_CONFIGS: Dict[str, Dict[str, Any]] = {
+# ── 风格颜色配置 ──
+STYLE_COLORS: Dict[str, Dict[str, Any]] = {
     "dark-tech": {
-        "name": "深色科技",
-        "bg_prompt_suffix": "deep blue-purple gradient background, futuristic tech style, glowing particles, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: linear-gradient(160deg, #0b1026, #131a3a, #1b1040); font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 56px; font-weight: 900; background: linear-gradient(90deg, #00d4ff, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 40px; line-height: 1.3; }
-            .point { background: rgba(255,255,255,0.08); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.15); border-radius: 16px; padding: 20px 28px; margin-bottom: 16px; color: #e0e7ff; font-size: 26px; line-height: 1.5; }
-            .point::before { content: '◆'; color: #00d4ff; margin-right: 12px; }
-            .summary { margin-top: 30px; padding: 24px 28px; background: rgba(0,212,255,0.08); border-left: 4px solid #00d4ff; border-radius: 0 12px 12px 0; color: #94a3b8; font-size: 22px; line-height: 1.6; }
-        """
+        "overlay": (10, 15, 36, 160),
+        "title": (0, 212, 255),
+        "point_bg": (0, 212, 255, 15),
+        "point_border": (0, 212, 255),
+        "point_text": (200, 220, 255),
+        "point_accent": (0, 212, 255),
+        "summary_bg": (0, 212, 255, 25),
+        "summary_border": (0, 212, 255),
+        "summary_text": (148, 163, 184),
+        "accent_color": (168, 85, 247),
+        "title_glow": True,
     },
     "pop": {
-        "name": "波普",
-        "bg_prompt_suffix": "pop art style background, bold primary colors, Ben-Day dots pattern, comic style, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: #FFD700; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 58px; font-weight: 900; color: #FF3B30; -webkit-text-stroke: 3px #111; text-shadow: 7px 7px 0 #111; margin-bottom: 40px; transform: rotate(-1deg); line-height: 1.3; }
-            .point { background: #fff; border: 5px solid #111; box-shadow: 7px 7px 0 #111; padding: 18px 24px; margin-bottom: 18px; color: #111; font-size: 26px; font-weight: 700; transform: rotate(1deg); line-height: 1.4; }
-            .point:nth-child(odd) { transform: rotate(-1deg); background: #FF6B9D; }
-            .point:nth-child(even) { background: #007AFF; color: #fff; }
-            .summary { margin-top: 30px; padding: 20px 24px; background: #7CFC00; border: 5px solid #111; box-shadow: 5px 5px 0 #111; color: #111; font-size: 22px; font-weight: 700; transform: rotate(-0.5deg); }
-        """
+        "overlay": (255, 200, 0, 140),
+        "title": (220, 40, 40),
+        "point_bg": (255, 255, 255, 200),
+        "point_border": (30, 30, 30),
+        "point_text": (30, 30, 30),
+        "point_accent": (220, 40, 40),
+        "summary_bg": (30, 30, 30, 220),
+        "summary_border": (30, 30, 30),
+        "summary_text": (255, 255, 200),
+        "accent_color": (220, 40, 40),
+        "title_glow": False,
     },
     "cyber": {
-        "name": "赛博酷炫",
-        "bg_prompt_suffix": "cyberpunk neon background, dark with glowing cyan and purple neon lines, futuristic grid, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: #0a0a1a; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 56px; font-weight: 900; color: #00e5ff; text-shadow: 0 0 10px #00e5ff, 0 0 20px #00e5ff, 0 0 40px #a855f7; margin-bottom: 40px; line-height: 1.3; }
-            .point { background: rgba(0,229,255,0.05); border: 2px solid rgba(0,229,255,0.35); box-shadow: 0 0 26px rgba(0,229,255,0.12); border-radius: 8px; padding: 20px 28px; margin-bottom: 16px; color: #e0f7ff; font-size: 26px; line-height: 1.5; }
-            .point::before { content: '▸'; color: #a855f7; margin-right: 12px; text-shadow: 0 0 8px #a855f7; }
-            .summary { margin-top: 30px; padding: 24px 28px; border: 1px solid rgba(168,85,247,0.5); box-shadow: 0 0 20px rgba(168,85,247,0.2); border-radius: 8px; color: #c4b5fd; font-size: 22px; line-height: 1.6; }
-        """
+        "overlay": (5, 5, 20, 170),
+        "title": (0, 230, 255),
+        "point_bg": (0, 230, 255, 12),
+        "point_border": (0, 230, 255),
+        "point_text": (190, 220, 255),
+        "point_accent": (180, 50, 255),
+        "summary_bg": (180, 50, 255, 25),
+        "summary_border": (180, 50, 255),
+        "summary_text": (160, 180, 220),
+        "accent_color": (180, 50, 255),
+        "title_glow": True,
     },
     "vaporwave": {
-        "name": "蒸汽波",
-        "bg_prompt_suffix": "vaporwave aesthetic background, pink and blue gradient, retro grid perspective, sunset glow, neon palm trees silhouette, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: linear-gradient(180deg, #1a0533, #2d1b69, #ff71ce); font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 56px; font-weight: 900; color: #fff; text-shadow: 0 0 10px #fff, 0 0 20px #ff71ce, 0 0 40px #01cdfe, 0 0 60px #b967ff; margin-bottom: 40px; line-height: 1.3; }
-            .point { background: rgba(255,255,255,0.1); border: 2px solid rgba(255,113,206,0.5); box-shadow: 0 0 15px rgba(1,205,254,0.3); border-radius: 12px; padding: 20px 28px; margin-bottom: 16px; color: #fff; font-size: 26px; line-height: 1.5; }
-            .point::before { content: '★'; color: #05ffa1; margin-right: 12px; }
-            .summary { margin-top: 30px; padding: 24px 28px; background: rgba(185,103,255,0.2); border: 1px solid #b967ff; border-radius: 12px; color: #e0c3fc; font-size: 22px; line-height: 1.6; }
-        """
+        "overlay": (80, 20, 120, 160),
+        "title": (255, 120, 220),
+        "point_bg": (255, 120, 220, 15),
+        "point_border": (255, 120, 220),
+        "point_text": (220, 190, 255),
+        "point_accent": (0, 255, 200),
+        "summary_bg": (0, 255, 200, 20),
+        "summary_border": (0, 255, 200),
+        "summary_text": (180, 220, 255),
+        "accent_color": (0, 255, 200),
+        "title_glow": True,
     },
     "glassmorphism": {
-        "name": "玻璃拟态",
-        "bg_prompt_suffix": "glassmorphism style background, colorful blurred light orbs, soft gradient with purple blue pink blobs, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 54px; font-weight: 800; color: #fff; margin-bottom: 40px; line-height: 1.3; text-shadow: 0 2px 10px rgba(0,0,0,0.2); }
-            .point { background: rgba(255,255,255,0.2); backdrop-filter: blur(22px); saturate(160%); -webkit-backdrop-filter: blur(22px); border: 1px solid rgba(255,255,255,0.3); box-shadow: inset 0 1px 0 rgba(255,255,255,0.4); border-radius: 20px; padding: 22px 28px; margin-bottom: 16px; color: #fff; font-size: 26px; line-height: 1.5; }
-            .summary { margin-top: 30px; padding: 24px 28px; background: rgba(255,255,255,0.15); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,0.25); border-radius: 16px; color: rgba(255,255,255,0.9); font-size: 22px; line-height: 1.6; }
-        """
+        "overlay": (255, 255, 255, 60),
+        "title": (60, 60, 80),
+        "point_bg": (255, 255, 255, 180),
+        "point_border": (255, 255, 255, 200),
+        "point_text": (60, 60, 80),
+        "point_accent": (100, 120, 220),
+        "summary_bg": (255, 255, 255, 160),
+        "summary_border": (255, 255, 255, 200),
+        "summary_text": (80, 80, 100),
+        "accent_color": (100, 120, 220),
+        "title_glow": False,
     },
     "bauhaus": {
-        "name": "包豪斯",
-        "bg_prompt_suffix": "bauhaus style background, geometric shapes, primary colors red yellow blue, black and white, clean modernist composition, no text, no letters, no watermark, pure background image",
-        "css": """
-            body { background: #F5F5F0; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-            .card { padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }
-            .title { font-size: 56px; font-weight: 900; color: #111; margin-bottom: 40px; line-height: 1.3; border-bottom: 6px solid #E03A3E; padding-bottom: 16px; }
-            .point { background: #fff; border: 3px solid #111; box-shadow: 5px 5px 0 #111; padding: 18px 24px; margin-bottom: 18px; color: #111; font-size: 26px; font-weight: 600; line-height: 1.4; }
-            .point:nth-child(1) { border-left: 8px solid #E03A3E; }
-            .point:nth-child(2) { border-left: 8px solid #F4D03F; }
-            .point:nth-child(3) { border-left: 8px solid #1C5AA3; }
-            .point:nth-child(4) { border-left: 8px solid #E03A3E; }
-            .point:nth-child(5) { border-left: 8px solid #F4D03F; }
-            .summary { margin-top: 30px; padding: 20px 24px; background: #111; color: #fff; font-size: 22px; font-weight: 600; }
-        """
-    }
+        "overlay": (255, 250, 240, 160),
+        "title": (30, 30, 30),
+        "point_bg": (255, 255, 255, 200),
+        "point_border": (30, 30, 30),
+        "point_text": (30, 30, 30),
+        "point_accent": (200, 50, 50),
+        "summary_bg": (30, 30, 30, 220),
+        "summary_border": (30, 30, 30),
+        "summary_text": (255, 250, 240),
+        "accent_color": (50, 100, 200),
+        "title_glow": False,
+    },
+}
+
+# ── 背景提示词后缀 ──
+STYLE_BG_PROMPTS: Dict[str, str] = {
+    "dark-tech": (
+        "Technology data stream background, dark blue and deep purple tones, "
+        "abstract digital patterns, grid lines, subtle glow effects, "
+        "futuristic atmosphere, clean and professional, 2K resolution"
+    ),
+    "pop": (
+        "Pop art style background, vibrant yellow and red, bold geometric shapes, "
+        "halftone dots pattern, comic book aesthetic, energetic and fun, "
+        "bright and colorful, 2K resolution"
+    ),
+    "cyber": (
+        "Cyberpunk city background, neon cyan and magenta, dark atmosphere, "
+        "digital rain, holographic grid, futuristic urban landscape, "
+        "glowing neon signs, high contrast, 2K resolution"
+    ),
+    "vaporwave": (
+        "Vaporwave aesthetic background, sunset purple and pink gradients, "
+        "neon grid lines, retro 80s synthwave, palm trees silhouette, "
+        "glitch art effects, dreamy nostalgic atmosphere, 2K resolution"
+    ),
+    "glassmorphism": (
+        "Soft gradient background in pastel blue and purple tones, "
+        "smooth abstract shapes, frosted glass texture, "
+        "minimalist and clean, gentle light effects, 2K resolution"
+    ),
+    "bauhaus": (
+        "Bauhaus design style background, cream and white base, "
+        "bold geometric shapes in red, blue, yellow, and black, "
+        "clean lines, constructivist composition, artistic, 2K resolution"
+    ),
 }
 
 
-def _generate_bg_prompt(card_content: Dict[str, Any], style: str) -> str:
-    """根据内容生成背景图提示词"""
-    style_cfg = STYLE_CONFIGS.get(style, STYLE_CONFIGS["dark-tech"])
-    title = card_content.get("title", "")
-    # 构建背景提示词：基于内容主题 + 风格后缀
-    bg_prompt = f"Abstract artistic background for knowledge card about '{title}', {style_cfg['bg_prompt_suffix']}"
-    return bg_prompt
+def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    """加载中文字体"""
+    font_path = FONT_BOLD if bold else FONT_REGULAR
+    try:
+        return ImageFont.truetype(font_path, size)
+    except Exception:
+        return ImageFont.load_default()
 
 
-def _build_html(card_content: Dict[str, Any], style: str) -> str:
-    """构建知识卡片HTML"""
-    style_cfg = STYLE_CONFIGS.get(style, STYLE_CONFIGS["dark-tech"])
-    css = style_cfg["css"]
-
-    title = card_content.get("title", "视频知识总结")
-    key_points: List[str] = card_content.get("key_points", [])
-    summary = card_content.get("summary", "")
-
-    # 限制要点数量（4-7个）
-    points = key_points[:7] if len(key_points) > 7 else key_points
-    if not points:
-        points = ["暂无要点"]
-
-    # 构建要点HTML
-    points_html = "\n".join([f'<div class="point">{p}</div>' for p in points])
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ width: 1080px; height: 1920px; overflow: hidden; }}
-{css}
-</style>
-</head>
-<body>
-<div class="card">
-    <div class="title">{title}</div>
-    {points_html}
-    <div class="summary">{summary}</div>
-</div>
-</body>
-</html>"""
-    return html
+def _draw_rounded_rect(
+    draw: Any,
+    xy: tuple,
+    radius: int,
+    fill: Optional[tuple] = None,
+    outline: Optional[tuple] = None,
+    width: int = 1,
+):
+    """画圆角矩形"""
+    x1, y1, x2, y2 = xy
+    draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def knowledge_card_gen_node(state: KnowledgeCardGenInput, config: RunnableConfig, runtime: Runtime[Context]) -> KnowledgeCardGenOutput:
+def _draw_text_with_glow(
+    draw: Any,
+    xy: tuple,
+    text: str,
+    font: Any,
+    fill: tuple,
+    glow_color: tuple = (0, 0, 0),
+    glow_radius: int = 8,
+    anchor: str = "la",
+):
+    """画带发光效果的文字（多层叠加模拟发光）"""
+    x, y = xy
+    # 发光层：画多层半透明文字
+    for offset in range(glow_radius, 0, -2):
+        alpha = max(20, 60 - offset * 3)
+        glow_fill = (glow_color[0], glow_color[1], glow_color[2], alpha)
+        draw.text((x, y), text, font=font, fill=glow_fill, anchor=anchor)
+    for offset in range(glow_radius, 0, -2):
+        alpha = max(20, 60 - offset * 3)
+        glow_fill = (glow_color[0], glow_color[1], glow_color[2], alpha)
+        draw.text((x - offset, y), text, font=font, fill=glow_fill, anchor=anchor)
+        draw.text((x + offset, y), text, font=font, fill=glow_fill, anchor=anchor)
+    # 主文字层
+    draw.text((x, y), text, font=font, fill=fill, anchor=anchor)
+
+
+def _wrap_text(draw: Any, text: str, font: Any, max_width: int) -> List[str]:
+    """自动换行"""
+    lines = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append("")
+            continue
+        words = list(paragraph)
+        current_line = ""
+        for char in words:
+            test_line = current_line + char
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            w = bbox[2] - bbox[0]
+            if w <= max_width:
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = char
+        if current_line:
+            lines.append(current_line)
+    return lines
+
+
+def _render_card(
+    background: Image.Image,
+    title: str,
+    key_points: List[str],
+    summary: str,
+    tags: Optional[List[str]] = None,
+    style: str = "dark-tech",
+) -> Image.Image:
+    """用Pillow在背景图上渲染卡片文字"""
+    colors = STYLE_COLORS.get(style, STYLE_COLORS["dark-tech"])
+    bg_w, bg_h = background.size
+
+    # 缩放到标准尺寸
+    bg = background.resize((CARD_WIDTH, CARD_HEIGHT), Image.Resampling.LANCZOS)
+
+    # 创建绘图层（RGBA，支持透明）
+    canvas = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    # ── 1. 半透明遮罩 ──
+    overlay = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), colors["overlay"])
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
+
+    # ── 2. 顶部装饰线 ──
+    _draw_rounded_rect(
+        draw,
+        (80, 60, CARD_WIDTH - 80, 64),
+        radius=2,
+        fill=colors["accent_color"] + (200,) if len(colors["accent_color"]) == 3 else colors["accent_color"],
+    )
+
+    # ── 3. 标题 ──
+    title_font = _load_font(76, bold=True)
+    title_color = colors["title"]
+    if len(title_color) == 3:
+        title_color = title_color + (255,)
+
+    # 标题发光效果
+    if colors.get("title_glow", False):
+        _draw_text_with_glow(
+            draw,
+            (CARD_WIDTH // 2, 160),
+            title,
+            title_font,
+            fill=title_color,
+            glow_color=title_color[:3],
+            glow_radius=12,
+            anchor="ma",
+        )
+    else:
+        draw.text((CARD_WIDTH // 2, 160), title, font=title_font, fill=title_color, anchor="ma")
+
+    # 标题下划线
+    title_bbox = draw.textbbox((0, 0), title, font=title_font)
+    title_w = title_bbox[2] - title_bbox[0]
+    line_y = 160 + (title_bbox[3] - title_bbox[1]) // 2 + 20
+    _draw_rounded_rect(
+        draw,
+        (CARD_WIDTH // 2 - title_w // 2 - 20, line_y, CARD_WIDTH // 2 + title_w // 2 + 20, line_y + 4),
+        radius=2,
+        fill=colors["accent_color"] + (200,) if len(colors["accent_color"]) == 3 else colors["accent_color"],
+    )
+
+    # ── 4. 要点列表 ──
+    point_font = _load_font(38)
+    point_text_color = colors["point_text"]
+    if len(point_text_color) == 3:
+        point_text_color = point_text_color + (255,)
+
+    point_accent = colors["point_accent"]
+    if len(point_accent) == 3:
+        point_accent = point_accent + (255,)
+
+    point_bg = colors["point_bg"]
+    if len(point_bg) == 3:
+        point_bg = point_bg + (255,)
+
+    point_border = colors["point_border"]
+    if len(point_border) == 3:
+        point_border = point_border + (255,)
+
+    start_y = 280
+    box_x1 = 100
+    box_x2 = CARD_WIDTH - 100
+    box_max_w = box_x2 - box_x1 - 40
+
+    for i, point in enumerate(key_points):
+        # 自动换行
+        lines = _wrap_text(draw, point, point_font, box_max_w)
+        line_height = 52
+        box_h = max(80, len(lines) * line_height + 40)
+
+        py = start_y + i * (box_h + 20)
+
+        # 要点背景框
+        _draw_rounded_rect(
+            draw,
+            (box_x1, py, box_x2, py + box_h),
+            radius=16,
+            fill=point_bg,
+            outline=point_border,
+            width=2,
+        )
+
+        # 左侧装饰竖条
+        _draw_rounded_rect(
+            draw,
+            (box_x1 + 8, py + 12, box_x1 + 12, py + box_h - 12),
+            radius=4,
+            fill=point_accent,
+        )
+
+        # 序号
+        num_font = _load_font(32, bold=True)
+        num_text = f"0{i + 1}"
+        draw.text((box_x1 + 28, py + 20), num_text, font=num_font, fill=point_accent, anchor="la")
+
+        # 要点文字
+        text_x = box_x1 + 90
+        text_y = py + 20
+        for line in lines:
+            draw.text((text_x, text_y), line, font=point_font, fill=point_text_color, anchor="la")
+            text_y += line_height
+
+    # ── 5. 底部标签 ──
+    if tags:
+        tag_font = _load_font(26)
+        tag_color = colors["accent_color"]
+        if len(tag_color) == 3:
+            tag_color = tag_color + (200,)
+
+        tag_x = 100
+        tag_y = CARD_HEIGHT - 240
+        tag_padding = 16
+        tag_gap = 12
+
+        for tag in tags[:4]:  # 最多显示4个标签
+            tag_bbox = draw.textbbox((0, 0), f"# {tag}", font=tag_font)
+            tag_w = tag_bbox[2] - tag_bbox[0] + tag_padding * 2
+            tag_h = tag_bbox[3] - tag_bbox[1] + tag_padding
+
+            _draw_rounded_rect(
+                draw,
+                (tag_x, tag_y, tag_x + tag_w, tag_y + tag_h + 8),
+                radius=20,
+                fill=tag_color[:3] + (40,),
+                outline=tag_color,
+                width=1,
+            )
+            draw.text(
+                (tag_x + tag_padding, tag_y + 4),
+                f"# {tag}",
+                font=tag_font,
+                fill=tag_color,
+                anchor="la",
+            )
+            tag_x += tag_w + tag_gap
+
+    # ── 6. 底部总结 ──
+    summary_font = _load_font(34)
+    summary_text_color = colors["summary_text"]
+    if len(summary_text_color) == 3:
+        summary_text_color = summary_text_color + (255,)
+
+    summary_bg_color = colors["summary_bg"]
+    if len(summary_bg_color) == 3:
+        summary_bg_color = summary_bg_color + (255,)
+
+    summary_border = colors["summary_border"]
+    if len(summary_border) == 3:
+        summary_border = summary_border + (255,)
+
+    # 总结文字换行
+    summary_lines = _wrap_text(draw, summary, summary_font, box_max_w)
+    summary_line_h = 46
+    summary_box_h = max(80, len(summary_lines) * summary_line_h + 40)
+    summary_y = CARD_HEIGHT - 180 - summary_box_h
+
+    _draw_rounded_rect(
+        draw,
+        (box_x1, summary_y, box_x2, summary_y + summary_box_h),
+        radius=16,
+        fill=summary_bg_color,
+        outline=summary_border,
+        width=2,
+    )
+
+    # 左侧装饰竖条
+    _draw_rounded_rect(
+        draw,
+        (box_x1 + 8, summary_y + 12, box_x1 + 12, summary_y + summary_box_h - 12),
+        radius=4,
+        fill=colors["accent_color"] + (200,) if len(colors["accent_color"]) == 3 else colors["accent_color"],
+    )
+
+    # 总结文字
+    s_text_x = box_x1 + 28
+    s_text_y = summary_y + 20
+    for line in summary_lines:
+        draw.text((s_text_x, s_text_y), line, font=summary_font, fill=summary_text_color, anchor="la")
+        s_text_y += summary_line_h
+
+    # ── 合成最终图片 ──
+    bg = bg.convert("RGBA")
+    result = Image.alpha_composite(bg, canvas)
+
+    return result.convert("RGB")
+
+
+def knowledge_card_gen_node(
+    state: KnowledgeCardGenInput,
+    config: RunnableConfig,
+    runtime: Runtime[Context],
+) -> KnowledgeCardGenOutput:
     """
-    title: 知识卡片生成
-    desc: 采用混合方案生成知识卡片：AI生成风格化背景 + HTML/CSS渲染文字内容 + Playwright截图合成，确保文字100%准确
-    integrations: 图片生成
+    title: 生成知识卡片
+    desc: 用AI生成背景图 + Pillow渲染文字，生成1080x1920知识卡片
+    integrations: 图片生成大模型, 对象存储
     """
     ctx = runtime.context
-    card_content = state.card_content
-    style = state.style
 
-    # ========== 如果上游有错误，直接跳过卡片生成 ==========
+    # 如果有错误，直接透传
     if state.error:
-        logger.warning(f"上游检测到错误，跳过卡片生成: {state.error}")
-        return KnowledgeCardGenOutput(error=state.error)
-    # ====================================================
-
-    # 获取风格配置
-    style_cfg = STYLE_CONFIGS.get(style, STYLE_CONFIGS["dark-tech"])
-
-    # ========== 步骤1: 生成风格化背景 ==========
-    bg_prompt = _generate_bg_prompt(card_content, style)
-    img_client = ImageGenerationClient(ctx=ctx)
-
-    # 优先使用环境变量覆盖图片生成模型，否则用默认的 Seedream 5.0
-    image_model = os.getenv("IMAGE_GEN_MODEL") or "doubao-seedream-5-0-260128"
-    bg_response = img_client.generate(
-        prompt=bg_prompt,
-        model=image_model,
-        size="2K",
-        watermark=False
-    )
-
-    if not bg_response.success:
-        raise ValueError(f"背景图生成失败: {bg_response.error_messages}")
-
-    bg_url = bg_response.image_urls[0]
-
-    # ========== 步骤2: 下载并缩放背景到 1080x1920 ==========
-    bg_img_path = f"/tmp/bg_{uuid.uuid4().hex[:8]}.png"
-    bg_data = requests.get(bg_url, timeout=60).content
-    with open(bg_img_path, "wb") as f:
-        f.write(bg_data)
-
-    # 使用PIL缩放到目标尺寸
-    target_size = (1080, 1920)
-    img = Image.open(bg_img_path)
-    img = img.resize(target_size, Image.Resampling.LANCZOS)
-    img.save(bg_img_path, "PNG")
-
-    # ========== 步骤3: 构建HTML（使用背景图 + 叠字） ==========
-    style_css = style_cfg["css"]
-    # 修改CSS，添加背景图
-    css_with_bg = style_css.replace(
-        "body {",
-        f"body {{ background-image: url('file://{bg_img_path}'); background-size: cover; background-position: center;"
-    )
-
-    title = card_content.get("title", "视频知识总结")
-    key_points: List[str] = card_content.get("key_points", [])
-    summary_text = card_content.get("summary", "")
-    points = key_points[:7] if len(key_points) > 7 else key_points
-    if not points:
-        points = ["暂无要点"]
-
-    points_html = "\n".join([f'<div class="point">{p}</div>' for p in points])
-
-    html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ width: 1080px; height: 1920px; overflow: hidden; background-image: url('file://{bg_img_path}'); background-size: cover; background-position: center; font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; }}
-{style_css.split('body {')[1].split('}')[0] if 'body {' in style_css else ''}
-.card {{ padding: 60px 50px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }}
-</style>
-<style>
-{style_css}
-</style>
-</head>
-<body>
-<div class="card">
-    <div class="title">{title}</div>
-    {points_html}
-    <div class="summary">{summary_text}</div>
-</div>
-</body>
-</html>"""
-
-    # ========== 步骤4: 使用Playwright截图 ==========
-    card_output_path = f"/tmp/knowledge_card_{uuid.uuid4().hex[:8]}.png"
-
-    # 自动安装 Playwright 浏览器（如果部署环境没装）
-    _ensure_chromium_installed()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1080, "height": 1920})
-        page.set_content(html_content)
-        # 等待字体和图片加载
-        page.wait_for_timeout(1000)
-        page.screenshot(path=card_output_path, full_page=False)
-        browser.close()
-
-    # ========== 步骤5: 上传卡片图片到对象存储 ==========
-    card_image_url = ""
-    try:
-        # 使用S3存储上传
-        s3_storage = S3SyncStorage(access_key="", secret_key="", bucket_name="")
-        with open(card_output_path, "rb") as f:
-            file_content = f.read()
-        file_key = s3_storage.upload_file(
-            file_content=file_content,
-            file_name="knowledge_card.png",
-            content_type="image/png"
+        return KnowledgeCardGenOutput(
+            card_image_url="",
+            card_content=state.card_content or {
+                "title": "⚠️ 无法解析该链接",
+                "key_points": ["该链接无法解析，请检查链接是否有效"],
+                "summary": "请检查链接是否有效，或尝试更换其他链接",
+                "tags": ["解析失败"],
+            },
+            error=state.error,
         )
-        # 生成签名URL
-        card_image_url = s3_storage.generate_presigned_url(key=file_key, expire_time=86400)
-        logger.info(f"卡片图片已上传到对象存储: {file_key}")
-    except Exception as e:
-        logger.warning(f"上传到对象存储失败，使用本地路径: {e}")
-        # 降级：复制到assets目录
-        workspace_path = os.getenv("COZE_WORKSPACE_PATH", "/workspace/projects")
-        assets_dir = os.path.join(workspace_path, "assets")
-        os.makedirs(assets_dir, exist_ok=True)
-        final_path = os.path.join(assets_dir, f"knowledge_card_{uuid.uuid4().hex[:8]}.png")
-        shutil.copy2(card_output_path, final_path)
-        card_image_url = f"file://{final_path}"
 
-    return KnowledgeCardGenOutput(card_image_url=card_image_url)
+    card_content = state.card_content or {}
+    style = state.style or "dark-tech"
+
+    title = card_content.get("title", "知识卡片")
+    key_points = card_content.get("key_points", [])
+    summary = card_content.get("summary", "")
+    tags = card_content.get("tags", [])
+
+    # ── 生成背景图 ──
+    try:
+        from coze_coding_dev_sdk import ImageGenerationClient
+
+        bg_prompt = STYLE_BG_PROMPTS.get(style, STYLE_BG_PROMPTS["dark-tech"])
+        image_model = os.getenv("IMAGE_GEN_MODEL") or "doubao-seedream-5-0-260128"
+
+        img_client = ImageGenerationClient()
+        response = img_client.generate(
+            prompt=bg_prompt,
+            model=image_model,
+            size="1440x2560",
+            batch_size=1,
+        )
+
+        # 解析返回的图片URL
+        bg_url = None
+        if hasattr(response, "image_urls") and response.image_urls:
+            bg_url = response.image_urls[0]
+        elif isinstance(response, dict):
+            urls = response.get("image_urls") or response.get("urls") or response.get("data", [])
+            if isinstance(urls, list) and urls:
+                bg_url = urls[0] if isinstance(urls[0], str) else urls[0].get("url")
+
+        if not bg_url:
+            raise ValueError("背景图生成失败：未返回图片URL")
+
+        logger.info(f"背景图已生成: {bg_url[:80]}...")
+
+        # 下载背景图
+        resp = requests.get(bg_url, timeout=60)
+        resp.raise_for_status()
+        bg_img = Image.open(io.BytesIO(resp.content))
+
+    except Exception as e:
+        logger.warning(f"背景图生成失败，使用纯色背景: {e}")
+        bg_img = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), (20, 25, 50))
+
+    # ── Pillow 渲染卡片 ──
+    try:
+        card_img = _render_card(
+            background=bg_img,
+            title=title,
+            key_points=key_points,
+            summary=summary,
+            tags=tags,
+            style=style,
+        )
+
+        # 保存到临时文件
+        tmp_path = os.path.join(tempfile.gettempdir(), f"knowledge_card_{int(time.time() * 1000)}.png")
+        card_img.save(tmp_path, "PNG", optimize=True)
+        logger.info(f"卡片已渲染: {tmp_path}")
+
+    except Exception as e:
+        logger.error(f"卡片渲染失败: {e}")
+        return KnowledgeCardGenOutput(
+            card_image_url="",
+            card_content=card_content,
+            error=f"卡片渲染失败: {e}",
+        )
+
+    # ── 上传到对象存储 ──
+    try:
+        from coze_coding_dev_sdk import S3SyncStorage
+
+        storage = S3SyncStorage()
+
+        with open(tmp_path, "rb") as f:
+            file_data = f.read()
+
+        remote_path = f"knowledge_card_{int(time.time() * 1000)}.png"
+        object_key = storage.upload_file(
+            file_content=file_data,
+            file_name=remote_path,
+            content_type="image/png",
+        )
+
+        if not object_key:
+            raise ValueError("上传对象存储失败：未返回object_key")
+
+        card_url = storage.generate_presigned_url(
+            key=object_key,
+            expire_time=86400 * 7
+        )
+
+        # 清理临时文件
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+        logger.info(f"卡片已上传: {card_url[:80]}...")
+
+        return KnowledgeCardGenOutput(
+            card_image_url=card_url,
+            card_content=card_content,
+            error="",
+        )
+
+    except Exception as e:
+        logger.error(f"上传对象存储失败: {e}")
+        return KnowledgeCardGenOutput(
+            card_image_url="",
+            card_content=card_content,
+            error=f"上传对象存储失败: {e}",
+        )
