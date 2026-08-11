@@ -18,6 +18,27 @@ from graphs.state import KnowledgeCardGenInput, KnowledgeCardGenOutput
 logger = logging.getLogger(__name__)
 
 
+def _ensure_chromium_installed() -> None:
+    """自动检查并安装 Playwright Chromium 浏览器（部署环境没有时自动下载）"""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # 检查浏览器是否已安装
+    chromium_path = Path.home() / ".cache" / "ms-playwright"
+    if not any(chromium_path.glob("chromium*")):
+        logger.info("Playwright Chromium 未安装，正在自动下载...")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True, capture_output=True, text=True, timeout=120
+            )
+            logger.info("Playwright Chromium 安装成功")
+        except Exception as e:
+            logger.error(f"Playwright 安装失败: {e}")
+            raise RuntimeError("自动安装 Playwright Chromium 失败，请检查网络或手动安装")
+
+
 # ============================================================
 # 风格配置 - 基于 video-knowledge-card 技能
 # ============================================================
@@ -239,6 +260,9 @@ body {{ width: 1080px; height: 1920px; overflow: hidden; background-image: url('
 
     # ========== 步骤4: 使用Playwright截图 ==========
     card_output_path = f"/tmp/knowledge_card_{uuid.uuid4().hex[:8]}.png"
+
+    # 自动安装 Playwright 浏览器（如果部署环境没装）
+    _ensure_chromium_installed()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
