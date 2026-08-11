@@ -165,9 +165,11 @@ def knowledge_card_gen_node(state: KnowledgeCardGenInput, config: RunnableConfig
     bg_prompt = _generate_bg_prompt(card_content, style)
     img_client = ImageGenerationClient(ctx=ctx)
 
+    # 优先使用环境变量覆盖图片生成模型，否则用默认的 Seedream 5.0
+    image_model = os.getenv("IMAGE_GEN_MODEL") or "doubao-seedream-5-0-260128"
     bg_response = img_client.generate(
         prompt=bg_prompt,
-        model="doubao-seedream-5-0-260128",
+        model=image_model,
         size="2K",
         watermark=False
     )

@@ -134,7 +134,8 @@ def video_analysis_node(state: VideoAnalysisInput, config: RunnableConfig, runti
 
     # 初始化LLM客户端
     client = LLMClient(ctx=ctx)
-    model_id = llm_config.get("model", "doubao-seed-2-0-pro-260215")
+    # 优先使用环境变量覆盖模型，否则用配置文件中的默认模型
+    model_id = os.getenv("VIDEO_ANALYSIS_MODEL") or llm_config.get("model", "doubao-seed-2-0-pro-260215")
     temperature = llm_config.get("temperature", 0.3)
     max_completion_tokens = llm_config.get("max_completion_tokens", 4096)
 
