@@ -72,4 +72,9 @@
 ```bash
 playwright install chromium
 ```
-否则 `knowledge_card_gen` 节点会因缺少 Chromium 浏览器而报错。
+（`playwright` Python 包已在 `pyproject.toml` 中声明，`uv sync` 会自动安装，无需手动 `pip install`）
+
+否则 `knowledge_card_gen` 节点会因缺少 Chromium 浏览器而报错：
+```
+Executable doesn't exist at /home/faas/.cache/ms-playwright/chromium_headless_shell-1161/chrome-linux/headless_shell
+```

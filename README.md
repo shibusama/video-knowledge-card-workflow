@@ -17,10 +17,10 @@ bash scripts/http_run.sh -m http -p 5000
 工作流生成知识卡片时使用 **Playwright** 截图合成，部署环境需安装：
 
 ```bash
-# 1. 安装 playwright Python 包（已在 pyproject.toml 中声明）
+# 1. 安装 playwright Python 包（已在 pyproject.toml 中声明，uv sync 自动安装）
 uv sync
 
-# 2. 安装 Chromium 浏览器（部署时必须执行）
+# 2. 安装 Chromium 浏览器（部署时必须执行，否则会报错）
 playwright install chromium
 ```
 
