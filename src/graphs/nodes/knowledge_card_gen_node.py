@@ -30,7 +30,7 @@ def _ensure_chromium_installed() -> None:
         logger.info("Playwright Chromium 未安装，正在自动下载...")
         try:
             subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
                 check=True, capture_output=True, text=True, timeout=120
             )
             logger.info("Playwright Chromium 安装成功")
