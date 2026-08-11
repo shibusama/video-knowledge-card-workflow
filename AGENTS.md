@@ -66,3 +66,10 @@
 - **实现**：`src/utils/wechat_sph.py`，两步纯HTTP：分享链接 → 腾讯元宝换取 exportId/token → 微信频道换取 videoUrl。仅用标准库 urllib，无第三方依赖。
 - **依赖环境变量**：`HY_TOKEN`（腾讯元宝 cookie，浏览器登录元宝后 F12 获取）。未配置时解析抛异常，节点回退到页面文本提取。
 - **来源**：移植自 `wx_channels_download/internal/api/sph/worker.js`，与 `taixing-ideabox` 的 `_parse_wechat_yuanbao` 逻辑一致。
+
+## 部署注意事项
+部署到 Coze 平台时，需要在**构建脚本**中添加：
+```bash
+playwright install chromium
+```
+否则 `knowledge_card_gen` 节点会因缺少 Chromium 浏览器而报错。
